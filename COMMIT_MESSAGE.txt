@@ -1,0 +1,15 @@
+feat: implement settings persistence, single-pass ffmpeg demuxing, spaCy caching, and UI cancellation pipeline
+
+- Add load_settings/save_settings with config.json persistence (fix #9)
+- Cache spaCy NLP pipeline across calls to avoid repeated reloads (fix #4)
+- Add lang_code_from_voice helper for robust Kokoro language code extraction (fix #5)
+- Implement text cleaning: abbreviation expansion and Roman numeral to word conversion
+- Add 5ms audio fades on synthesized segments to prevent clicks and pops
+- Convert Kokoro torch tensors to numpy arrays for reliable post-processing
+- Replace multi-step ffmpeg M4B encode with single-pass concat demuxer
+- Parse ffmpeg stderr in real-time for accurate progress and ETA
+- Add threading.Event support for UI Cancel and exit flows throughout core/UI
+- Add Cancel button, auto-save settings on UI changes, daemon preview threads
+- Update About dialog to attribute original author Claudio Santini and fork maintainer runlevel6
+- Add README.md with fork attribution, MIT license notice, and feature highlights
+- Include unmodified MIT LICENSE from original santinic/audiblez repository
