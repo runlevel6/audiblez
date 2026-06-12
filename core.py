@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 # audiblez - A program to convert e-books into audiobooks using
 # Kokoro-82M model for high-quality text-to-speech synthesis.
-# Originally by Claudio Santini 2025 - https://github.com/santinic/audiblez
-# Enhanced fork by runlevel6 2025
+# Originally by Claudio Santini 2025 - https://claudio.uk
+# Fork by runlevel6 2025
+
 import os
 import traceback
 import uuid
@@ -792,11 +793,12 @@ def create_m4b(chapter_files, filename, cover_image, output_folder,
     m4b_dir.mkdir(parents=True, exist_ok=True)
     final_filename = m4b_dir / m4b_name
     chapters_txt_path = Path(output_folder) / "chapters.txt"
-    list_file_path = Path(output_folder) / f"{Path(filename).stem}_wav_list_{uuid.uuid4().hex[:8]}.txt"
+    safe_stem = Path(filename).stem.replace("'", "")
+    list_file_path = Path(output_folder) / f"{safe_stem}_wav_list_{uuid.uuid4().hex[:8]}.txt"
 
     with open(list_file_path, 'w') as f:
         for chapter_file in chapter_files:
-            escaped = str(Path(chapter_file).resolve()).replace("'", "\'")
+            escaped = str(Path(chapter_file).resolve()).replace("'", "'\\''")
             f.write(f"file '{escaped}'\n")
     print(f"WAV list ({len(chapter_files)} files): {list_file_path}")
 
