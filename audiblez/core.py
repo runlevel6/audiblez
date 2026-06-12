@@ -36,25 +36,30 @@ sample_rate = 24000
 _SPOKEN_CHARS_PER_SEC = 12.5  # ~150 wpm * 5 chars / 60 s
 _AAC_ENCODE_RT_FACTOR = 50    # ffmpeg aac runs ~50x realtime
 
-# Fix #10: use path relative to this file so it resolves consistently
-# regardless of where the process is launched from.
-CONFIG_FILE = Path(__file__).parent / 'config.json'
+def _config_candidates():
+    env_config = os.environ.get('AUDIBLEZ_CONFIG_FILE')
+    if env_config:
+        yield Path(env_config).expanduser()
 
+    source_config = Path(__file__).resolve().parents[1] / 'config.json'
+    if source_config.exists():
+        yield source_config
 
-# ---------------------------------------------------------------------------
-# Settings  (fix #9: single source of truth — UI imports from here)
-# ---------------------------------------------------------------------------
+    yield Path.home() / '.config' / 'audiblez' / 'config.json'
+
 
 def load_settings():
     """Loads settings from the JSON configuration file."""
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            settings = json.load(f)
-            if 'output_folder' in settings:
-                settings['output_folder'] = str(Path(settings['output_folder']))
-            return settings
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    for config_file in _config_candidates():
+        try:
+            with open(config_file, 'r') as f:
+                settings = json.load(f)
+                if 'output_folder' in settings:
+                    settings['output_folder'] = str(Path(settings['output_folder']))
+                return settings
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+    return {}
 
 
 def save_settings(output_folder, voice, speed=1.0):
@@ -68,12 +73,14 @@ def save_settings(output_folder, voice, speed=1.0):
         'voice': voice,
         'speed': float(speed),
     }
+    config_file = next(_config_candidates())
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, 'w') as f:
             json.dump(settings, f, indent=4)
-        print(f"Settings saved to {CONFIG_FILE}.")
+        print(f"Settings saved to {config_file}.")
     except IOError as e:
-        print(f"Error saving settings to {CONFIG_FILE}: {e}")
+        print(f"Error saving settings to {config_file}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -720,59 +727,6 @@ def delete_wav_files(wav_files):
             print(f"Deleted: {wav_file}")
         except OSError as e:
             print(f"Error deleting {wav_file}: {e}")
-
-
-def _popen_run(args, stop_event=None, **kwargs):
-    """
-    Drop-in replacement for subprocess.run() that can be interrupted.
-    Polls every 0.5 s; if stop_event is set, terminates the child process
-    and raises RuntimeError so callers can abort cleanly.
-
-    Pipe buffer fix: if stdout/stderr are piped, drain them in background
-    threads so the OS pipe buffer (typically 64 KB on Linux) never fills up
-    and blocks the child process — which would cause an unrecoverable deadlock
-    on long ffmpeg encodes.  Captured output is stored on proc._stdout_data
-    and proc._stderr_data so callers can inspect it after the process exits.
-    """
-    proc = subprocess.Popen(args, **kwargs)
-
-    stdout_lines, stderr_lines = [], []
-
-    def _drain(stream, buf):
-        for line in stream:
-            buf.append(line)
-
-    drain_threads = []
-    if proc.stdout:
-        t = threading.Thread(target=_drain, args=(proc.stdout, stdout_lines), daemon=True)
-        t.start()
-        drain_threads.append(t)
-    if proc.stderr:
-        t = threading.Thread(target=_drain, args=(proc.stderr, stderr_lines), daemon=True)
-        t.start()
-        drain_threads.append(t)
-
-    while True:
-        try:
-            proc.wait(timeout=0.5)
-            break
-        except subprocess.TimeoutExpired:
-            if stop_event and stop_event.is_set():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                raise RuntimeError('Stopped by user.')
-
-    for t in drain_threads:
-        t.join()
-
-    proc._stdout_data = ''.join(stdout_lines)
-    proc._stderr_data = ''.join(stderr_lines)
-
-    return proc
 
 
 def create_m4b(chapter_files, filename, cover_image, output_folder,
