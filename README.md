@@ -18,7 +18,15 @@ On my M2 MacBook Pro, on CPU, it takes about 1 hour, at a rate of about 60 chara
 
 This fork adds significant architectural improvements over the original project:
 
-- **Settings Persistence via `config.json`** — voice, speed, and output folder are saved and loaded automatically via `load_settings()` / `save_settings()` (fix #9). No more configuring options every launch.
+- **AI-Assisted Pronunciation Correction (Gemini)** — the flagship feature of this release. When **AI Phonetic Check** is enabled, each chapter is rewritten by Google Gemini *before* synthesis so Kokoro pronounces tricky words correctly. The model expands abbreviations (`Dr.` → `Doctor`, `NASA` → `N A S A`), spells out numbers and dates (`2024` → `twenty twenty four`, `3rd` → `third`), re-spells homophones and silent letters, and **always** rewrites foreign proper nouns — personal names, place names, military units — into an English-friendly spelling or an inline IPA override with stress marks (e.g. `Péronne` → `Peyron`). Plain English respelling is preferred when it is simpler and just as accurate; punctuation is preserved because it shapes prosody.
+
+- **Full-pipeline, chunked AI rewriting** — the AI step runs on the *entire book* during synthesis, not just on a preview snippet. Chapters that already have a WAV file on disk are skipped without any API call, and very long chapters are rewritten in chunks of roughly 300K tokens each, with live per-chunk progress shown in the GUI.
+
+- **AI integration never blocks a conversion** — Gemini calls auto-retry on transient `503 UNAVAILABLE` errors; if retries are exhausted the GUI offers **OK** (continue without AI correction) or **Cancel** (stop the run). Any other failure or malformed AI response silently falls back to the original text, so audiobook generation always proceeds.
+
+- **"Check with AI" analysis + corrected preview** — a GUI button analyzes the selected chapter and lists each flagged word with the reason and its IPA transcription, followed by the exact rewritten text that will be sent to the TTS engine (the analysis and the rewrite share the same phonetic rules, so they can never disagree). The **Preview** button runs the same silent correction on its snippet, so the sample you hear matches the final book.
+
+- **Settings Persistence via `config.json`** — voice, speed, and output folder are saved and loaded automatically via `load_settings()` / `save_settings()` (fix #9), together with the Gemini AI settings (`gemini_enabled`, `gemini_api_key`, `gemini_model`, default model `gemini-3.1-flash-lite`). No more configuring options every launch.
 
 - **Cached spaCy NLP Pipeline** — spaCy is loaded once and reused across synthesis runs, eliminating the expensive model load and dramatically speeding up repeated runs (fix #4).
 
