@@ -1,2 +1,23 @@
 __pycache__/
 MEMORY_BANK.md
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets (contains Gemini API key / user settings)
+audiblez/config.json
+config.json
+
+# Generated audio / intermediate files
+*.wav
+*.m4b
+*.mp3
+chapters.txt
+cover
+
+# Temp files
+*.tmp
+*.bak
+*.original

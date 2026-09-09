@@ -18,7 +18,7 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 # fix #9: import settings helpers from core — single source of truth
-from audiblez.core import load_settings, save_settings, DEFAULT_VOICE
+from audiblez.core import load_settings, save_settings, DEFAULT_VOICE, check_phonetic_transcription_ai, correct_phonetics_ai
 from audiblez.voices import voices, flags
 
 EVENTS = {
@@ -26,6 +26,8 @@ EVENTS = {
     'CORE_PROGRESS': NewEvent(),
     'CORE_CHAPTER_STARTED': NewEvent(),
     'CORE_CHAPTER_FINISHED': NewEvent(),
+    'CORE_AI_REWRITE': NewEvent(),
+    'CORE_AI_RETRY_EXHAUSTED': NewEvent(),
     'CORE_FINISHED': NewEvent()
 }
 
@@ -48,9 +50,12 @@ class MainWindow(wx.Frame):
         self.Bind(EVENTS['CORE_CHAPTER_STARTED'][1], self.on_core_chapter_started)
         self.Bind(EVENTS['CORE_CHAPTER_FINISHED'][1], self.on_core_chapter_finished)
         self.Bind(EVENTS['CORE_PROGRESS'][1], self.on_core_progress)
+        self.Bind(EVENTS['CORE_AI_REWRITE'][1], self.on_core_ai_rewrite)
+        self.Bind(EVENTS['CORE_AI_RETRY_EXHAUSTED'][1], self.on_core_ai_retry_exhausted)
         self.Bind(EVENTS['CORE_FINISHED'][1], self.on_core_finished)
 
         self.settings = load_settings()
+        self.last_open_dir = self.settings.get('last_open_dir', str(Path.home()))
 
         self.create_menu()
         self.create_layout()
@@ -93,6 +98,34 @@ class MainWindow(wx.Frame):
         self.progress_bar_label.SetLabel(f"Synthesis Progress: {event.stats.progress}%")
         self.eta_label.SetLabel(f"Estimated Time Remaining: {event.stats.eta}")
         self.synth_panel.Layout()
+
+    def on_core_ai_rewrite(self, event):
+        ci = getattr(event, 'chapter_index', None)
+        ct = getattr(event, 'chapter_total', None)
+        idx = getattr(event, 'chunk_index', 0)
+        tot = getattr(event, 'chunk_total', 0)
+        if ci is not None and tot > 0:
+            self.progress_bar_label.SetLabel(
+                f"AI rewriting chapter {ci + 1}/{ct}: chunk {idx}/{tot}")
+        elif ci is not None:
+            self.progress_bar_label.SetLabel(f"AI rewriting chapter {ci + 1}/{ct}…")
+        else:
+            self.progress_bar_label.SetLabel("AI rewriting…")
+        self.synth_panel.Layout()
+
+    def on_core_ai_retry_exhausted(self, event):
+        msg = getattr(event, 'message', 'AI service unavailable after multiple retries.')
+        answer = wx.MessageBox(
+            f"The Gemini AI service is currently unavailable or experiencing high demand.\n\n"
+            f"All retry attempts have been exhausted.\n\n"
+            f"Details: {msg}\n\n"
+            f"Click OK to continue synthesis without AI phonetic correction, "
+            f"or Cancel to stop the synthesis.",
+            "AI Service Unavailable",
+            wx.OK | wx.CANCEL | wx.ICON_WARNING
+        )
+        if answer == wx.CANCEL and self.synthesis_in_progress:
+            self.cancel_current_synthesis()
 
     def on_core_finished(self, event):
         self.synthesis_in_progress = False
@@ -148,8 +181,15 @@ class MainWindow(wx.Frame):
         preview_button = wx.Button(self.center_panel, label="🔊 Preview")
         preview_button.Bind(wx.EVT_BUTTON, self.on_preview_chapter)
 
+        check_ai_button = wx.Button(self.center_panel, label="🤖 Check with AI")
+        check_ai_button.Bind(wx.EVT_BUTTON, self.on_check_phonetic_ai)
+
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        button_sizer.Add(preview_button, 0, wx.ALL, 5)
+        button_sizer.Add(check_ai_button, 0, wx.ALL, 5)
+
         self.center_sizer.Add(self.chapter_label, 0, wx.ALL, 5)
-        self.center_sizer.Add(preview_button, 0, wx.ALL, 5)
+        self.center_sizer.Add(button_sizer, 0, wx.ALL, 5)
         self.center_sizer.Add(self.text_area, 1, wx.ALL | wx.EXPAND, 5)
 
         splitter_right_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -160,12 +200,10 @@ class MainWindow(wx.Frame):
         splitter_right_sizer.Add(self.right_panel, 1, wx.ALL | wx.EXPAND, 5)
 
     def about_dialog(self):
-        msg = ("Audiblez — Generate audiobooks from e-books\n"
+        msg = ("A simple tool to generate audiobooks from EPUB files using Kokoro-82M models\n"
                "Distributed under the MIT License.\n\n"
-               "Original project by Claudio Santini 2025 — https://github.com/santinic/audiblez\n"
-               "Enhanced, optimized fork by runlevel6 2025\n\n"
-               "Features: settings persistence, spaCy caching, text cleaning,\n"
-               "audio fades, single-pass ffmpeg concat demuxer, threaded cancellation\n")
+               "Originally by Claudio Santini 2025 — https://claudio.uk\n"
+               "Fork by Vlad Reshetov 2025\n")
         wx.MessageBox(msg, "Audiblez")
 
     def create_right_panel(self, splitter_right):
@@ -268,15 +306,38 @@ class MainWindow(wx.Frame):
         sizer.Add(speed_label, pos=(2, 0), flag=wx.ALL, border=border)
         sizer.Add(speed_text_input, pos=(2, 1), flag=wx.ALL, border=border)
 
+        ai_enabled_label = wx.StaticText(panel, label="AI Phonetic Check:")
+        ai_enabled_checkbox = wx.CheckBox(panel, label="Enabled")
+        ai_enabled_checkbox.SetValue(self.settings.get('gemini_enabled', False))
+        ai_enabled_checkbox.Bind(wx.EVT_CHECKBOX, self.on_ai_enabled_changed)
+        self.ai_enabled_checkbox = ai_enabled_checkbox
+        sizer.Add(ai_enabled_label, pos=(3, 0), flag=wx.ALL, border=border)
+        sizer.Add(ai_enabled_checkbox, pos=(3, 1), flag=wx.ALL, border=border)
+
+        api_key_label = wx.StaticText(panel, label="Gemini API Key:")
+        api_key_text_input = wx.TextCtrl(panel, value=self.settings.get('gemini_api_key', ''), style=wx.TE_PASSWORD)
+        api_key_text_input.Bind(wx.EVT_TEXT, self.on_ai_api_key_changed)
+        self.ai_api_key_text_ctrl = api_key_text_input
+        sizer.Add(api_key_label, pos=(4, 0), flag=wx.ALL, border=border)
+        sizer.Add(api_key_text_input, pos=(4, 1), flag=wx.ALL | wx.EXPAND, border=border)
+
+        ai_model_label = wx.StaticText(panel, label="Gemini Model:")
+        ai_model_choices = ['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-flash-lite-latest']
+        ai_model_dropdown = wx.ComboBox(panel, choices=ai_model_choices, value=self.settings.get('gemini_model', 'gemini-3.1-flash-lite'))
+        ai_model_dropdown.Bind(wx.EVT_COMBOBOX, self.on_ai_model_changed)
+        self.ai_model_dropdown = ai_model_dropdown
+        sizer.Add(ai_model_label, pos=(5, 0), flag=wx.ALL, border=border)
+        sizer.Add(ai_model_dropdown, pos=(5, 1), flag=wx.ALL | wx.EXPAND, border=border)
+
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
         initial_output_folder = self.settings.get('output_folder', os.path.abspath('.'))
         self.output_folder_text_ctrl = wx.TextCtrl(panel, value=initial_output_folder)
         self.output_folder_text_ctrl.SetEditable(False)
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(3, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(6, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(6, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(7, 1), flag=wx.ALL, border=border)
 
     def create_synthesis_panel(self):
         panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
@@ -335,17 +396,42 @@ class MainWindow(wx.Frame):
         except ValueError:
             print("Invalid speed value. Please enter a number.")
 
+    def on_ai_enabled_changed(self, event):
+        self.save_current_settings()
+
+    def on_ai_api_key_changed(self, event):
+        self.save_current_settings()
+
+    def on_ai_model_changed(self, event):
+        self.save_current_settings()
+
     def save_current_settings(self):
         """Save current GUI settings via core's save_settings."""
+        output_folder = self.output_folder_text_ctrl.GetValue() if (hasattr(self, 'output_folder_text_ctrl') and self.output_folder_text_ctrl) else self.settings.get('output_folder', '.')
+        voice = self.get_selected_voice() if hasattr(self, 'selected_voice') else self.settings.get('voice', 'af_heart')
+        speed = self.selected_speed if hasattr(self, 'selected_speed') else self.settings.get('speed', 1.0)
+        gemini_api_key = self.ai_api_key_text_ctrl.GetValue() if (hasattr(self, 'ai_api_key_text_ctrl') and self.ai_api_key_text_ctrl) else self.settings.get('gemini_api_key', '')
+        gemini_api_key = ' '.join(gemini_api_key.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').split())
+        gemini_model = self.ai_model_dropdown.GetValue() if (hasattr(self, 'ai_model_dropdown') and self.ai_model_dropdown) else self.settings.get('gemini_model', 'gemini-3.1-flash-lite')
+        gemini_enabled = self.ai_enabled_checkbox.GetValue() if (hasattr(self, 'ai_enabled_checkbox') and self.ai_enabled_checkbox) else self.settings.get('gemini_enabled', False)
+        last_open_dir = self.last_open_dir if hasattr(self, 'last_open_dir') else self.settings.get('last_open_dir', '')
+
         save_settings(
-            output_folder=self.output_folder_text_ctrl.GetValue(),
-            voice=self.get_selected_voice(),
-            speed=self.selected_speed,
+            output_folder=output_folder,
+            voice=voice,
+            speed=speed,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
+            gemini_enabled=gemini_enabled,
+            last_open_dir=last_open_dir,
         )
 
     def open_epub(self, file_path):
         if hasattr(self, 'selected_book'):
+            ai_enabled = self.ai_enabled_checkbox.GetValue() if (hasattr(self, 'ai_enabled_checkbox') and self.ai_enabled_checkbox) else self.settings.get('gemini_enabled', False)
             self.splitter.DestroyChildren()
+        else:
+            ai_enabled = self.settings.get('gemini_enabled', False)
 
         self.selected_file_path = file_path
         print(f"Opening file: {file_path}")
@@ -366,7 +452,7 @@ class MainWindow(wx.Frame):
         self.selected_book_author = meta_creator[0][0] if meta_creator else ''
         self.selected_book = book
 
-        self.document_chapters = core.find_document_chapters_and_extract_texts(book)
+        self.document_chapters = core.find_document_chapters_and_extract_texts(book, ai_enabled=ai_enabled)
         good_chapters = core.find_good_chapters(self.document_chapters)
         self.selected_chapter = good_chapters[0] if good_chapters else None
         if self.selected_chapter is None:
@@ -469,6 +555,25 @@ class MainWindow(wx.Frame):
 
         voice = self.get_selected_voice()
         button = event.GetEventObject()
+        ai_enabled = self.ai_enabled_checkbox.GetValue()
+        api_key = self.ai_api_key_text_ctrl.GetValue().strip() if ai_enabled else ''
+        model = self.ai_model_dropdown.GetValue()
+
+        if ai_enabled and not api_key:
+            wx.MessageBox("AI phonetic check is enabled but the Gemini API key is missing. "
+                          "Disable AI or enter a key in the settings panel.",
+                          "Missing API Key", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        text = self.selected_chapter.extracted_text[:300]
+        if not text.strip():
+            wx.MessageBox("Selected chapter has no text for preview.", "Warning", wx.OK | wx.ICON_WARNING)
+            return
+
+        def reset_button():
+            wx.CallAfter(button.SetLabel, "🔊 Preview")
+            wx.CallAfter(button.Enable)
+
         button.SetLabel("⏳")
         button.Disable()
 
@@ -476,14 +581,16 @@ class MainWindow(wx.Frame):
             import audiblez.core as core
             from kokoro import KPipeline
             try:
-                pipeline = KPipeline(lang_code=core.lang_code_from_voice(voice))
-                text = self.selected_chapter.extracted_text[:300]
-                if not text.strip():
-                    wx.CallAfter(wx.MessageBox, "Selected chapter has no text for preview.", "Warning", wx.OK | wx.ICON_WARNING)
-                    return
+                preview_text = text
+                if ai_enabled:
+                    corrected = core.correct_phonetics_ai(
+                        text=preview_text, api_key=api_key, model=model)
+                    if corrected and corrected.strip() and corrected != preview_text:
+                        preview_text = corrected
 
+                pipeline = KPipeline(lang_code=core.lang_code_from_voice(voice))
                 audio_segments = core.gen_audio_segments(
-                    pipeline, text, voice=voice, speed=self.get_selected_speed())
+                    pipeline, preview_text, voice=voice, speed=self.get_selected_speed())
 
                 if not audio_segments:
                     wx.CallAfter(wx.MessageBox, "Could not generate audio for preview.", "Error", wx.OK | wx.ICON_ERROR)
@@ -502,8 +609,7 @@ class MainWindow(wx.Frame):
                 import traceback
                 traceback.print_exc()
             finally:
-                wx.CallAfter(button.SetLabel, "🔊 Preview")
-                wx.CallAfter(button.Enable)
+                reset_button()
 
         # fix #8: don't join on the UI thread — use daemon threads and just
         # let previous previews finish in the background.  The finally block
@@ -513,6 +619,70 @@ class MainWindow(wx.Frame):
         self.preview_threads.append(thread)
         # Prune dead threads from the list so it doesn't grow forever
         self.preview_threads = [t for t in self.preview_threads if t.is_alive()]
+
+    def on_check_phonetic_ai(self, event):
+        if not self.selected_chapter:
+            wx.MessageBox("No chapter selected for AI check.", "Warning", wx.OK | wx.ICON_WARNING)
+            return
+
+        if not self.ai_enabled_checkbox.GetValue():
+            wx.MessageBox("AI phonetic check is not enabled. Please enable it in the settings panel.",
+                          "AI Not Enabled", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        api_key = self.ai_api_key_text_ctrl.GetValue().strip()
+        if not api_key:
+            wx.MessageBox("Gemini API key is missing. Please enter it in the settings panel.",
+                          "Missing API Key", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        text = self.selected_chapter.extracted_text.strip()
+        if not text:
+            wx.MessageBox("Selected chapter has no text for AI analysis.", "Warning", wx.OK | wx.ICON_WARNING)
+            return
+
+        model = self.ai_model_dropdown.GetValue()
+
+        button = event.GetEventObject()
+        button.SetLabel("⏳")
+        button.Disable()
+
+        def run_ai_check():
+            import audiblez.core as core
+            try:
+                result = core.check_phonetic_transcription_ai(
+                    text=text,
+                    api_key=api_key,
+                    model=model
+                )
+                wx.CallAfter(self.show_ai_result_dialog, result)
+            except Exception as e:
+                wx.CallAfter(wx.MessageBox, f"Error during AI check: {e}", "AI Error", wx.OK | wx.ICON_ERROR)
+                import traceback
+                traceback.print_exc()
+            finally:
+                wx.CallAfter(button.SetLabel, "🤖 Check with AI")
+                wx.CallAfter(button.Enable)
+
+        thread = threading.Thread(target=run_ai_check, daemon=True)
+        thread.start()
+
+    def show_ai_result_dialog(self, result_text):
+        dialog = wx.Dialog(self, title="AI Phonetic Transcription Analysis", size=(700, 500))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        text_ctrl = wx.TextCtrl(dialog, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+        text_ctrl.SetValue(result_text)
+
+        close_button = wx.Button(dialog, label="Close")
+        close_button.Bind(wx.EVT_BUTTON, lambda event: dialog.EndModal(wx.ID_OK))
+
+        sizer.Add(text_ctrl, 1, wx.ALL | wx.EXPAND, 10)
+        sizer.Add(close_button, 0, wx.ALL | wx.CENTER, 10)
+
+        dialog.SetSizer(sizer)
+        dialog.ShowModal()
+        dialog.Destroy()
 
     def on_start(self, event):
         self.synthesis_in_progress = True
@@ -550,12 +720,15 @@ class MainWindow(wx.Frame):
 
     def on_open(self, event):
         with wx.FileDialog(self, "Open EPUB File", wildcard="*.epub",
+                           defaultDir=self.last_open_dir,
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dialog:
             if dialog.ShowModal() == wx.ID_CANCEL:
                 return
             file_path = dialog.GetPath()
             if not file_path:
                 return
+            self.last_open_dir = str(Path(file_path).parent)
+            self.save_current_settings()
             if self.synthesis_in_progress:
                 wx.MessageBox("Audiobook synthesis is still in progress. Please wait.",
                               "Synthesis in Progress")
@@ -563,6 +736,14 @@ class MainWindow(wx.Frame):
                 wx.CallAfter(self.open_epub, file_path)
 
     def on_cancel(self, event):
+        self.cancel_current_synthesis()
+
+    def cancel_current_synthesis(self):
+        """Stop the current run: fire stop_event and flag the UI as stopped.
+
+        Shared by the "⛔ Cancel Synthesis" button and the Cancel button on the
+        AI-service-unavailable popup (on_core_ai_retry_exhausted).
+        """
         if self.stop_event:
             self.stop_event.set()
         self.cancel_button.Disable()

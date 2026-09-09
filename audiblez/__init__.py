@@ -1,3 +1,3 @@
-"""Audiblez package."""
+import os, sys
 
-__version__ = "0.5.0"
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
